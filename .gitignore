@@ -1,0 +1,13 @@
+config.json
+input_pdfs/
+output_json/
+work/
+tmp/
+bench_out/
+.cache_texTojson/
+__pycache__/
+*.py[cod]
+*.tmp
+*.log
+.DS_Store
+.vscode/
