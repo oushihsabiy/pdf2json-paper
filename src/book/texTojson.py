@@ -26,7 +26,7 @@ STREAM_REQUIRED: Optional[bool] = None
 # -----------------------------
 # Fill this with your desired source name.
 # If non-empty, ALL output JSON items will use this value in field "source".
-SOURCE_NAME_ENTRY = "ConvexOptimizationSolutionsManual,1-30"
+SOURCE_NAME_ENTRY = "OptimizationDomainPaper"
 
 
 # -----------------------------

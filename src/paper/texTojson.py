@@ -334,7 +334,7 @@ BLOCK_START_RE = re.compile(r'^\s*%<BLOCK\s+type=(\w+)\s+label="((?:\\.|[^"])*)"
 BLOCK_END_RE = re.compile(r'^\s*%</BLOCK>\s*$')
 
 THEOREM_LIKE_BTYPE = {"defn", "thm", "lem", "prop", "cor", "alg", "algorithm"}
-PROOF_BTYPE = {"proof", "solution"}
+PROOF_BTYPE = {"proof"}
 
 # Remove figures/tables early
 _FIG_BEGIN_RE = re.compile(r"\\begin\{(figure|table)\*?\}")
@@ -812,7 +812,7 @@ LATEX_TO_JSON_PROMPT_TEMPLATE = (
     "Output: a JSON array. Each element is an object with keys:\n"
     "  - env: one of [\"def\",\"thm\",\"lem\",\"prop\",\"alg\"]\n"
     "  - content: the core statement in LaTeX (plain text or wrapped env is both acceptable)\n"
-    "  - proof: either \"\" or the COMPLETE \\begin{proof}...\\end{proof} or \\begin{solution}...\\end{solution} from the LaTeX\n\n"
+    "  - proof: either \"\" or COMPLETE \\begin{proof}...\\end{proof}\n\n"
     "Rules (strict):\n"
     "1) Never output env outside the allowed list. Never output env='text'.\n"
     "2) Only extract theorem/lemma/proposition/algorithm/corollary when explicitly marked in the LaTeX (e.g., \\begin{theorem}, \\begin{lemma}, etc.). Skip implicit or prose statements.\n"
@@ -821,7 +821,8 @@ LATEX_TO_JSON_PROMPT_TEMPLATE = (
     "5) Do NOT hallucinate or complete missing math content.\n"
     "6) For research-paper text:\n"
     "   - Put the statement into content.\n"
-    "   - Put the proof/solution text into proof only if explicitly present as \\begin{proof} or \\begin{solution}, otherwise set proof to \"\".\n"
+    "   - Put source proof text into proof if present\n"
+    "   - If no proof is present, set proof to \"\".\n"
     "7) Drop non-problem noise (ToC, page headers/footers, figure/table remnants, prompt leakage).\n"
     "8) If nothing usable as a theorem/definition/algorithm item exists, output [].\n\n"
     "Implicit dependency recovery mode: __IMPLICIT_MODE__\n"
@@ -953,6 +954,74 @@ def llm_extract_definitions_from_prose(
         pass
 
     return []
+
+# Only these envs are considered "needs proof" for auto-generation.
+PROOF_REQUIRED_ENVS = {"thm", "lem", "prop"}
+
+PROOF_GEN_PROMPT_TEMPLATE = (
+    "You are given ONE theorem-like statement in LaTeX. Write a mathematically correct proof.\n"
+    "\n"
+    "Output format (STRICT):\n"
+    "- Output ONLY a proof environment:\n"
+    "  \\begin{proof}\n"
+    "  ...\n"
+    "  \\end{proof}\n"
+    "- Do NOT output any other environments.\n"
+    "- Do NOT output markdown fences or commentary.\n"
+    "\n"
+    "Rules:\n"
+    "- Prefer a proof that is faithful to the source style and notation when the statement suggests existing dependencies.\n"
+    "- If the argument naturally depends on earlier results, you may cite them explicitly rather than artificially rewriting the proof to be self-contained.\n"
+    "- Preserve the notation used in the statement.\n"
+    "- If the statement contains labeled equations (\\label{eq:...}), you may reference them with \\eqref{...}.\n"
+    "- This path is only a fallback when source proof is missing.\n"
+    "- If a proof truly cannot be provided from the statement alone, write a best-effort proof and clearly\n"
+    "  state any additional assumptions INSIDE the proof as a comment line starting with %% ASSUMPTION: .\n"
+    "\n"
+    "Statement:\n"
+    "__STATEMENT__\n"
+)
+
+
+def llm_generate_proof_for_statement(
+    client: OpenAI,
+    model: str,
+    statement_env_text: str,
+    *,
+    max_tokens: int,
+    cache_dir: Optional[Path] = None,
+    cache_enabled: bool = True,
+) -> str:
+    """
+    Generate a proof for a theorem-like statement.
+    Returns a COMPLETE \\begin{proof}...\\end{proof} block, or "" on failure.
+    """
+    stmt = (statement_env_text or "").strip()
+    if not stmt:
+        return ""
+
+    prompt = PROOF_GEN_PROMPT_TEMPLATE.replace("__STATEMENT__", stmt)
+    raw = llm_call_cached(
+        client,
+        model,
+        prompt,
+        max_tokens=max_tokens,
+        cache_dir=cache_dir,
+        cache_enabled=cache_enabled,
+    )
+    raw = strip_code_fences(raw)
+    raw = clean_llm_latex(raw).strip()
+
+    # Extract first proof env if present
+    m = re.search(r"(?s)\\begin\{proof\}.*?\\end\{proof\}", raw)
+    if m:
+        return m.group(0).strip()
+
+    # If model returned plain proof text, wrap it.
+    if raw.strip():
+        return f"\\begin{{proof}}\n{raw.strip()}\n\\end{{proof}}".strip()
+
+    return ""
 
 
 def llm_latex_to_items(
@@ -1479,7 +1548,7 @@ def split_statement_and_solution(latex: str) -> Tuple[str, str]:
         return stmt, sol
 
     # For research papers: handle proof blocks
-    m_proof = re.search(r"(?is)\\begin\{proof\}(.*?)\\end\{proof\}", s)
+    m_proof = re.search(r"(?s)\\begin\{proof\}(.*?)\\end\{proof\}", s)
     if m_proof:
         proof = (m_proof.group(1) or "").strip()
         stmt = (s[: m_proof.start()] + "\n" + s[m_proof.end() :]).strip()
@@ -2109,6 +2178,9 @@ def convert_tex_to_items(
     client: OpenAI,
     json_model: str,
     max_tokens_json: int,
+    proof_model: Optional[str] = None,
+    max_tokens_proof: int = 2048,
+    gen_missing_proofs: bool = True,
     implicit_mode: str = "rule",   # off|rule|llm
     max_unit_chars: int = 6000,
     # optional refinement pass (mostly disabled in source-first solution-manual mode)
@@ -2126,11 +2198,13 @@ def convert_tex_to_items(
     """
     End-to-end extraction for solution-manual style books:
       - parse nodes -> build units
-      - LLM: unit -> tentative items [{env, content}]
+      - LLM: unit -> tentative items [{env, content, proof}]
+      - source-first correction: proof is taken from source solution/proof blocks when available
       - post-process: canonical env, wrapping, labels/deps/context bookkeeping
       - final mapping is done by `to_example_output_schema` (problem/proof/type/source/source_idx)
     """
     body = strip_outer_document(tex)
+    proof_model = (proof_model or json_model)
     refine_model = (refine_model or json_model)
     dep_patch_model = (dep_patch_model or json_model)
     if cache_enabled and cache_dir is None:
@@ -2316,6 +2390,8 @@ def convert_tex_to_items(
                 if u.kind == "theorem_like":
                     do_refine = True
                 elif statement_needs_refine(content, env0) or proof_needs_refine(proof):
+                    do_refine = True
+                elif gen_missing_proofs and (not proof.strip()) and env0 in PROOF_REQUIRED_ENVS:
                     do_refine = True
 
             if do_refine and refine_model:
@@ -2882,6 +2958,9 @@ def main() -> None:
     json_model = require_str(cfg, "model")
     max_tokens_json = int(get_setting(settings, "TEXTOJSON_MAX_TOKENS", 4096))
 
+    proof_model = json_model
+    max_tokens_proof = int(get_setting(settings, "TEXTOJSON_MAX_TOKENS_PROOF", 2048))
+
     refine_model = json_model
     max_tokens_refine = int(get_setting(settings, "TEXTOJSON_MAX_TOKENS_REFINE", 2048))
 
@@ -2914,6 +2993,10 @@ def main() -> None:
     if args.max_unit_chars is not None and args.max_unit_chars > 1000:
         max_unit_chars = int(args.max_unit_chars)
 
+    gen_missing_proofs = bool(get_setting(settings, "TEXTOJSON_GEN_MISSING_PROOFS", True)) and (
+        not bool(getattr(args, "no_gen_proofs", False))
+    )
+
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
@@ -2931,6 +3014,9 @@ def main() -> None:
         client=client,
         json_model=json_model,
         max_tokens_json=max_tokens_json,
+        proof_model=proof_model,
+        max_tokens_proof=max_tokens_proof,
+        gen_missing_proofs=gen_missing_proofs,
         implicit_mode=implicit_mode,
         max_unit_chars=max_unit_chars,
         refine_mode=refine_mode,
