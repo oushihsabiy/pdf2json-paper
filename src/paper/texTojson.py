@@ -2317,8 +2317,6 @@ def convert_tex_to_items(
                     do_refine = True
                 elif statement_needs_refine(content, env0) or proof_needs_refine(proof):
                     do_refine = True
-                elif gen_missing_proofs and (not proof.strip()) and env0 in PROOF_REQUIRED_ENVS:
-                    do_refine = True
 
             if do_refine and refine_model:
                 recent = _recent_item_labels(ctx, limit=8)
@@ -2884,9 +2882,6 @@ def main() -> None:
     json_model = require_str(cfg, "model")
     max_tokens_json = int(get_setting(settings, "TEXTOJSON_MAX_TOKENS", 4096))
 
-    proof_model = json_model
-    max_tokens_proof = int(get_setting(settings, "TEXTOJSON_MAX_TOKENS_PROOF", 2048))
-
     refine_model = json_model
     max_tokens_refine = int(get_setting(settings, "TEXTOJSON_MAX_TOKENS_REFINE", 2048))
 
@@ -2919,10 +2914,6 @@ def main() -> None:
     if args.max_unit_chars is not None and args.max_unit_chars > 1000:
         max_unit_chars = int(args.max_unit_chars)
 
-    gen_missing_proofs = bool(get_setting(settings, "TEXTOJSON_GEN_MISSING_PROOFS", True)) and (
-        not bool(getattr(args, "no_gen_proofs", False))
-    )
-
     client = OpenAI(
         api_key=api_key,
         base_url=base_url,
@@ -2940,9 +2931,6 @@ def main() -> None:
         client=client,
         json_model=json_model,
         max_tokens_json=max_tokens_json,
-        proof_model=proof_model,
-        max_tokens_proof=max_tokens_proof,
-        gen_missing_proofs=gen_missing_proofs,
         implicit_mode=implicit_mode,
         max_unit_chars=max_unit_chars,
         refine_mode=refine_mode,
