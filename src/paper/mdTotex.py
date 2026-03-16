@@ -9,27 +9,28 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 BULLET_RE = re.compile(r"^\s*[-*+]\s+(.+?)\s*$")
 NUMBERED_RE = re.compile(r"^\s*\d+\.\s+(.+?)\s*$")
 IMAGE_RE = re.compile(r"^\s*!\[(.*?)\]\((.*?)\)\s*$")
+PAGE_MARK_RE = re.compile(r"^\s*<!--\s*PAGE\s+\d+\s*-->\s*$", re.IGNORECASE)
 THEOREM_MARK_RE = re.compile(
     r"^\s*(Theorem|Lemma|Proposition|Definition|Corollary)\s+(\d+(?:\.\d+)*)\s*\.?\s*$",
     re.IGNORECASE,
 )
 PROOF_MARK_RE = re.compile(r"^\s*Proof\s*\.?\s*$", re.IGNORECASE)
-# Inline bold format: **Theorem 1** content...  or  **Theorem 1.2** *content...*
+# Inline header format: **Theorem 1** content...  or  Theorem 1: content...
 THEOREM_INLINE_RE = re.compile(
-    r"^\*\*(Theorem|Lemma|Proposition|Definition|Corollary)"
-    r"\s+(\d+(?:\.\d+)*)(?:\s*\([^)]*\))?\*\*\s*(.*)",
+    r"^\s*(?:\*\*)?(Theorem|Lemma|Proposition|Definition|Corollary)"
+    r"\s+(\d+(?:\.\d+)*)(?:\s*\([^)]*\))?(?:\*\*)?\s*[:\.-]?\s*(.*)$",
     re.IGNORECASE,
 )
-# Inline italic proof: *Proof* content...  or  *Proof of Theorem N* content...
+# Inline/standalone proof: *Proof* ... / *Proof of Theorem 3* ... / Proof: ...
 PROOF_INLINE_RE = re.compile(
-    r"^\*(Proof(?:\s+of\s+[^*]*)?)\*\s*(.*)",
+    r"^\s*(?:\*\*)?\*?(Proof(?:\s+of\s+[^*:.]+)?)\*?(?:\*\*)?\s*[:\.]?\s*(.*)$",
     re.IGNORECASE,
 )
 _THEOREM_ENV_MAP = {
@@ -102,11 +103,17 @@ def parse_blocks(markdown: str) -> List[Dict[str, str]]:
     while i < n:
         line = lines[i]
 
-        if not line.strip():
+        stripped = line.strip()
+
+        if not stripped:
             i += 1
             continue
 
-        if line.strip().startswith("```"):
+        if PAGE_MARK_RE.match(stripped):
+            i += 1
+            continue
+
+        if stripped.startswith("```"):
             code_lines: List[str] = []
             i += 1
             while i < n and not lines[i].strip().startswith("```"):
@@ -117,8 +124,8 @@ def parse_blocks(markdown: str) -> List[Dict[str, str]]:
             blocks.append({"type": "code", "content": "\n".join(code_lines)})
             continue
 
-        if line.strip().startswith("$$"):
-            start = line.strip()
+        if stripped.startswith("$$"):
+            start = stripped
             if start != "$$" and start.endswith("$$") and len(start) > 4:
                 content = start[2:-2].strip()
                 blocks.append({"type": "equation", "content": content})
@@ -134,13 +141,13 @@ def parse_blocks(markdown: str) -> List[Dict[str, str]]:
             blocks.append({"type": "equation", "content": "\n".join(eq_lines).strip()})
             continue
 
-        if HEADING_RE.match(line.strip()):
-            blocks.append({"type": "heading", "content": line.strip()})
+        if HEADING_RE.match(stripped):
+            blocks.append({"type": "heading", "content": stripped})
             i += 1
             continue
 
-        if IMAGE_RE.match(line.strip()):
-            blocks.append({"type": "image", "content": line.strip()})
+        if IMAGE_RE.match(stripped):
+            blocks.append({"type": "image", "content": stripped})
             i += 1
             continue
 
@@ -183,11 +190,14 @@ def parse_blocks(markdown: str) -> List[Dict[str, str]]:
         i += 1
         while i < n:
             cur = lines[i]
-            if not cur.strip():
+            cur_s = cur.strip()
+            if not cur_s:
                 break
-            if cur.strip().startswith("```") or cur.strip().startswith("$$"):
+            if PAGE_MARK_RE.match(cur_s):
                 break
-            if HEADING_RE.match(cur.strip()) or IMAGE_RE.match(cur.strip()):
+            if cur_s.startswith("```") or cur_s.startswith("$$"):
+                break
+            if HEADING_RE.match(cur_s) or IMAGE_RE.match(cur_s):
                 break
             if cur.lstrip().startswith(">"):
                 break
@@ -289,56 +299,61 @@ def convert_math_environments(paragraph: str) -> str:
     if not lines:
         return ""
 
+    def _clean_marker_tail(text: str) -> str:
+        text = text.strip()
+        return re.sub(r"^\*(.+)\*$", r"\1", text)
+
+    def _match_theorem_header(text: str) -> Optional[Tuple[str, str]]:
+        m_inline = THEOREM_INLINE_RE.match(text)
+        if m_inline:
+            env_name = _THEOREM_ENV_MAP.get(m_inline.group(1).lower(), "theorem")
+            tail = _clean_marker_tail(m_inline.group(3))
+            return env_name, tail
+
+        m_plain = THEOREM_MARK_RE.match(text)
+        if m_plain:
+            env_name = _THEOREM_ENV_MAP.get(m_plain.group(1).lower(), "theorem")
+            return env_name, ""
+
+        return None
+
+    def _match_proof_header(text: str) -> Optional[str]:
+        m = PROOF_INLINE_RE.match(text)
+        if not m:
+            return None
+        return _clean_marker_tail(m.group(2))
+
     first = lines[0].strip()
+    theorem_header = _match_theorem_header(first)
+    if theorem_header is not None:
+        env, first_tail = theorem_header
+        theorem_lines: List[str] = [first_tail] if first_tail else []
+        proof_lines: List[str] = []
+        in_proof = False
 
-    # Pattern 1: standalone theorem marker on its own line, e.g. "Theorem 1"
-    tmatch = THEOREM_MARK_RE.match(first)
-    if tmatch:
-        name = tmatch.group(1).lower()
-        env = _THEOREM_ENV_MAP.get(name, "theorem")
-        body_lines = lines[1:]
+        for ln in lines[1:]:
+            if not in_proof:
+                proof_tail = _match_proof_header(ln.strip())
+                if proof_tail is not None:
+                    in_proof = True
+                    if proof_tail:
+                        proof_lines.append(proof_tail)
+                    continue
+                theorem_lines.append(ln)
+            else:
+                proof_lines.append(ln)
 
-        proof_index = -1
-        for idx, ln in enumerate(body_lines):
-            if PROOF_MARK_RE.match(ln.strip()):
-                proof_index = idx
-                break
-
-        if proof_index >= 0:
-            theorem_part = body_lines[:proof_index]
-            proof_part = body_lines[proof_index + 1:]
-            theorem_body = "\n".join(convert_inline_text(ln) for ln in theorem_part).strip()
-            proof_body = "\n".join(convert_inline_text(ln) for ln in proof_part).strip()
-            theorem_block = f"\\begin{{{env}}}\n{theorem_body}\n\\end{{{env}}}"
+        theorem_body = "\n".join(convert_inline_text(ln) for ln in theorem_lines).strip()
+        theorem_block = f"\\begin{{{env}}}\n{theorem_body}\n\\end{{{env}}}"
+        if proof_lines:
+            proof_body = "\n".join(convert_inline_text(ln) for ln in proof_lines).strip()
             proof_block = f"\\begin{{proof}}\n{proof_body}\n\\end{{proof}}"
             return theorem_block + "\n\n" + proof_block
+        return theorem_block
 
-        body = "\n".join(convert_inline_text(ln) for ln in body_lines).strip()
-        return f"\\begin{{{env}}}\n{body}\n\\end{{{env}}}"
-
-    # Pattern 2: inline bold format: **Theorem 1** content...
-    imatch = THEOREM_INLINE_RE.match(first)
-    if imatch:
-        name = imatch.group(1).lower()
-        env = _THEOREM_ENV_MAP.get(name, "theorem")
-        first_content = imatch.group(3).strip()
-        # Strip surrounding italic markers if the content is wrapped in *...*
-        first_content = re.sub(r"^\*(.+)\*$", r"\1", first_content)
-        body_lines = ([first_content] if first_content else []) + lines[1:]
-        body = "\n".join(convert_inline_text(ln) for ln in body_lines).strip()
-        return f"\\begin{{{env}}}\n{body}\n\\end{{{env}}}"
-
-    # Pattern 3: inline italic proof: *Proof* content...  or  *Proof of Theorem N* content...
-    pmatch = PROOF_INLINE_RE.match(first)
-    if pmatch:
-        first_content = pmatch.group(2).strip()
-        body_lines = ([first_content] if first_content else []) + lines[1:]
-        body = "\n".join(convert_inline_text(ln) for ln in body_lines).strip()
-        return f"\\begin{{proof}}\n{body}\n\\end{{proof}}"
-
-    # Pattern 4: standalone "Proof." on its own line
-    if PROOF_MARK_RE.match(first):
-        body_lines = lines[1:]
+    proof_tail = _match_proof_header(first)
+    if proof_tail is not None or PROOF_MARK_RE.match(first):
+        body_lines = ([proof_tail] if proof_tail else []) + lines[1:]
         body = "\n".join(convert_inline_text(ln) for ln in body_lines).strip()
         return f"\\begin{{proof}}\n{body}\n\\end{{proof}}"
 
