@@ -1,8 +1,61 @@
 import re
 import json
 import os
-import requests
 from openai import OpenAI
+
+
+ENV_TYPE_MAP = {
+    "definition": "definition",
+    "defn": "definition",
+    "lemma": "lemma",
+    "lem": "lemma",
+    "proposition": "proposition",
+    "prop": "proposition",
+    "theorem": "theorem",
+    "thm": "theorem",
+    "corollary": "corollary",
+    "cor": "corollary",
+}
+
+THEOREM_LIKE_CANONICAL = {"lemma", "proposition", "theorem", "corollary"}
+THEOREM_LIKE_ENV_NAMES = {
+    "lemma", "lem", "proposition", "prop", "theorem", "thm", "corollary", "cor"
+}
+PROOF_ENV_NAMES = {"proof", "solution", "sol"}
+
+
+def _extract_env_blocks(latex_content, env_names):
+    env_pattern = (
+        r"\\begin\{(?P<env>" + "|".join(sorted(env_names, key=len, reverse=True)) + r")\}"
+        r"(?P<body>.*?)"
+        r"\\end\{\1\}"
+    )
+    return list(re.finditer(env_pattern, latex_content, re.DOTALL | re.IGNORECASE))
+
+
+def _is_in_ranges(position, ranges):
+    for start, end in ranges:
+        if start <= position < end:
+            return True
+    return False
+
+
+def _clean_llm_json_text(response_text):
+    text = (response_text or "").strip()
+    text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```\s*$", "", text)
+    return text.strip()
+
+
+def _find_text_position_outside_ranges(haystack, needle, ranges, start_at=0):
+    if not needle:
+        return -1
+    pos = haystack.find(needle, max(0, start_at))
+    while pos != -1:
+        if not _is_in_ranges(pos, ranges):
+            return pos
+        pos = haystack.find(needle, pos + 1)
+    return -1
 
 def extract_math_environments(latex_content):
     """
@@ -10,14 +63,21 @@ def extract_math_environments(latex_content):
     Associate proofs with the preceding theorem/proposition.
     Returns list with start/end positions.
     """
-    environments = ['definition', 'lemma', 'proposition', 'theorem', 'corollary']
+    environments = set(ENV_TYPE_MAP.keys())
     extracted = []
 
     # Use finditer to get positions for environments
-    pattern = r'\\begin\{(' + '|'.join(environments) + r')\}(.*?)\\end\{\1\}'
-    for match in re.finditer(pattern, latex_content, re.DOTALL):
-        env_type = match.group(1)
-        env_content = match.group(2).strip()
+    pattern = (
+        r"\\begin\{(?P<env>" + "|".join(sorted(environments, key=len, reverse=True)) + r")\}"
+        r"(?P<body>.*?)"
+        r"\\end\{\1\}"
+    )
+    for match in re.finditer(pattern, latex_content, re.DOTALL | re.IGNORECASE):
+        env_name = match.group("env").lower()
+        env_type = ENV_TYPE_MAP.get(env_name)
+        if not env_type:
+            continue
+        env_content = match.group("body").strip()
         start = match.start()
         end = match.end()
         extracted.append({
@@ -28,17 +88,26 @@ def extract_math_environments(latex_content):
             "proof": ""
         })
 
-    #TODO: 1. 对于\solution也添加到"proof"中
-    #TODO: 2. 修改handle proofs的代码，要求其对proof和solution进行匹配，匹配合适的theorem/corollary/propositon/lemma
-    # Handle proofs
-    proof_pattern = r'\\begin\{proof\}(.*?)\\end\{proof\}'
-    for match in re.finditer(proof_pattern, latex_content, re.DOTALL):
-        proof_content = match.group(1).strip()
+    extracted.sort(key=lambda x: x["start"])
+
+    # Handle proof / solution blocks and attach them to the nearest previous theorem-like block.
+    proof_pattern = (
+        r"\\begin\{(?P<env>" + "|".join(sorted(PROOF_ENV_NAMES, key=len, reverse=True)) + r")\}"
+        r"(?P<body>.*?)"
+        r"\\end\{\1\}"
+    )
+    for match in re.finditer(proof_pattern, latex_content, re.DOTALL | re.IGNORECASE):
+        proof_content = match.group("body").strip()
+        if not proof_content:
+            continue
         proof_start = match.start()
         # Find the preceding theorem by checking positions
         for item in reversed(extracted):
-            if item["type"] in environments and item["proof"] == "" and item["end"] < proof_start:
-                item["proof"] = proof_content
+            if item["type"] in THEOREM_LIKE_CANONICAL and item["end"] < proof_start:
+                if item["proof"]:
+                    item["proof"] += "\n\n" + proof_content
+                else:
+                    item["proof"] = proof_content
                 break
 
     return extracted
@@ -60,11 +129,15 @@ def call_llm(prompt, api_key, base_url, model):
         print(f"LLM 调用失败: {e}")
         return None
 
-#TODO: 3. 修改extract_implicit_definitions函数，要求不能在theorem/lemma/proposition/corollary
-#       板块中提取definition
 def extract_implicit_definitions(latex_content, api_key, base_url, model):
+    # Do not extract implicit definitions from theorem-like environments.
+    protected_ranges = [
+        (m.start(), m.end()) for m in _extract_env_blocks(latex_content, THEOREM_LIKE_ENV_NAMES)
+    ]
+
     prompt = f"""
-请从以下 LaTeX 文本中提取所有隐式的定义（definition），包括没有明确标记为 definition 的部分，以及在其他环境中（如 proposition、theorem）中包含定义性内容的段落。
+请从以下 LaTeX 文本中提取所有隐式的定义（definition），包括没有明确标记为 definition 的部分。
+严格要求：不要提取 theorem / lemma / proposition / corollary（以及它们缩写环境 thm/lem/prop/cor）内部的任何内容。
 隐式的定义可能以 "Let us define"、"We define"、"Define"、"Let us identify"、"We write ... as" 等开头的句子或段落，或者描述概念、符号、函数、比率等的定义性内容。
 
 例如：
@@ -93,26 +166,62 @@ def extract_implicit_definitions(latex_content, api_key, base_url, model):
         response = call_llm(prompt, api_key, base_url, model)
         if response is None:
             return []
-        # 尝试解析 JSON
-        implicit_defs = json.loads(response)
+
+        # 尝试解析 JSON（允许模型返回 markdown code fence）
+        cleaned = _clean_llm_json_text(response)
+        implicit_defs = json.loads(cleaned)
+        if not isinstance(implicit_defs, list):
+            return []
+
         # 转换为统一格式
         unified = []
+        search_start = 0
         for item in implicit_defs:
-            position = item.get("position", 0)
+            if not isinstance(item, dict):
+                continue
+            content = item.get("content", "")
+            if not isinstance(content, str) or not content.strip():
+                continue
+
+            raw_pos = item.get("position", -1)
+            position = raw_pos if isinstance(raw_pos, int) else -1
+            if position < 0 or position >= len(latex_content) or _is_in_ranges(position, protected_ranges):
+                position = _find_text_position_outside_ranges(
+                    latex_content,
+                    content,
+                    protected_ranges,
+                    start_at=search_start,
+                )
+                if position == -1:
+                    position = _find_text_position_outside_ranges(
+                        latex_content,
+                        content,
+                        protected_ranges,
+                        start_at=0,
+                    )
+            if position == -1:
+                continue
+
+            if _is_in_ranges(position, protected_ranges):
+                continue
+
+            search_start = position + max(1, len(content))
             unified.append({
                 "start": position,
-                "end": position + len(item.get("content", "")),
-                "type": item.get("type", "definition"),
-                "content": item.get("content", ""),
+                "end": position + len(content),
+                "type": "definition",
+                "content": content,
                 "proof": item.get("proof", ""),
                 "预估难度": item.get("预估难度", ""),
                 "source": item.get("source", ""),
                 "source_index": item.get("source_index", "")
             })
+
+        unified.sort(key=lambda x: x["start"])
         return unified
     except json.JSONDecodeError as e:
         print(f"JSON 解析失败: {e}")
-        print(f"LLM 响应: {response}")
+        print(f"LLM 响应: {cleaned if 'cleaned' in locals() else response}")
         return []
     except Exception as e:
         print(f"LLM 调用失败: {e}")
