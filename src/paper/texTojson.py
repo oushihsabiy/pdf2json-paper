@@ -28,6 +28,8 @@ def extract_math_environments(latex_content):
             "proof": ""
         })
 
+    #TODO: 1. 对于\solution也添加到"proof"中
+    #TODO: 2. 修改handle proofs的代码，要求其对proof和solution进行匹配，匹配合适的theorem/corollary/propositon/lemma
     # Handle proofs
     proof_pattern = r'\\begin\{proof\}(.*?)\\end\{proof\}'
     for match in re.finditer(proof_pattern, latex_content, re.DOTALL):
@@ -58,6 +60,8 @@ def call_llm(prompt, api_key, base_url, model):
         print(f"LLM 调用失败: {e}")
         return None
 
+#TODO: 3. 修改extract_implicit_definitions函数，要求不能在theorem/lemma/proposition/corollary
+#       板块中提取definition
 def extract_implicit_definitions(latex_content, api_key, base_url, model):
     prompt = f"""
 请从以下 LaTeX 文本中提取所有隐式的定义（definition），包括没有明确标记为 definition 的部分，以及在其他环境中（如 proposition、theorem）中包含定义性内容的段落。
