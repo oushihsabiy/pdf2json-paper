@@ -1087,6 +1087,331 @@ def split_large_para_blocks(blocks: List[Block], max_chars: int = 3000) -> List[
 
 
 # =========================
+# Conversion layer: LLM-based Markdown→LaTeX
+# =========================
+
+class LowQualityLLMOutput(Exception):
+    """Raised when LLM output fails validation (leaked prompts, excessive repetition)."""
+    pass
+
+
+# ---- Utility functions for LaTeX processing ----
+
+def strip_code_fences(s: str) -> str:
+    """Remove markdown code fences from LLM output."""
+    s = (s or "").strip()
+    s = re.sub(r"^\s*```(?:latex)?\s*", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*```\s*$", "", s)
+    return s.strip()
+
+
+def strip_outer_document(s: str) -> str:
+    """Remove \\documentclass ... \\end{document} wrapper (LLM sometimes adds this)."""
+    s = (s or "").strip()
+    s = re.sub(r"(?s)\\documentclass.*?\\begin\{document\}", "", s)
+    s = re.sub(r"(?s)\\end\{document\}\s*$", "", s)
+    return s.strip()
+
+
+def normalize_unicode_symbols(latex: str) -> str:
+    """Normalize Unicode symbols that should be LaTeX."""
+    latex = latex.replace("§", r"\S ")
+    latex = latex.replace("\u00A0", " ")
+    return latex
+
+
+def normalize_display_math(latex: str) -> str:
+    """Normalize display math delimiters: $$...$$ -> \\[...\\]."""
+    def repl(m: re.Match) -> str:
+        inner = m.group(1).strip()
+        return "\\[\n" + inner + "\n\\]"
+    return re.sub(r"(?s)\$\$(.*?)\$\$", repl, latex)
+
+
+def normalize_double_backslash_begin_end(latex: str) -> str:
+    """Fix LLM bug: \\begin{...} should be \\begin{...}."""
+    s = latex or ""
+    s = re.sub(r"(?m)^(\s*)\\\\(begin|end)\{", r"\1\\\2{", s)
+    s = re.sub(r"(?<!\\)\\\\(begin|end)\{", r"\\\1{", s)
+    return s
+
+
+def _is_hard_boundary(line: str) -> bool:
+    """Check if a line is a structural boundary (section, clearpage, etc)."""
+    s = (line or "").lstrip()
+    if not s:
+        return False
+    if s.startswith((r"\section", r"\subsection", r"\subsubsection", r"\chapter", r"\paragraph",
+                      r"\clearpage", r"\newpage")):
+        return True
+    if s.startswith("% ===== Page"):
+        return True
+    return False
+
+
+def _balance_math_env_pairs(latex: str) -> str:
+    """
+    Heal common LLM mistakes in equation environments:
+    - duplicate \\begin{equation}
+    - illegal nesting (equation inside aligned)
+    - missing \\end{...}
+    
+    Conservative line-oriented approach.
+    """
+    lines = (latex or "").splitlines()
+    out: List[str] = []
+    stack: List[str] = []
+    
+    _MATH_ENV_RE = re.compile(r"^\s*\\(?P<kind>begin|end)\{(?P<env>(?:equation|align|gather|multline|flalign|align\*|equation\*)\*?)\}\s*$")
+    
+    def prev_nonempty() -> str:
+        for k in range(len(out) - 1, -1, -1):
+            t = out[k].strip()
+            if t:
+                return t
+        return ""
+    
+    for line in lines:
+        # If at hard boundary, close any open envs
+        if stack and _is_hard_boundary(line):
+            while stack:
+                out.append(rf"\end{{{stack.pop()}}}")
+        
+        m = _MATH_ENV_RE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        
+        kind = m.group("kind")
+        env = m.group("env")
+        
+        if kind == "begin":
+            # Close any open env before starting new one (prevent nesting)
+            if stack:
+                open_env = stack.pop()
+                out.append(rf"\end{{{open_env}}}")
+            stack.append(env)
+            out.append(line)
+            continue
+        
+        # kind == "end"
+        if stack:
+            stack.pop()
+            out.append(line)
+        # else: drop unmatched end to keep doc compilable
+    
+    # Close any remaining open envs
+    while stack:
+        out.append(rf"\end{{{stack.pop()}}}")
+    
+    return "\n".join(out)
+
+
+def _normalize_opt_operators(latex: str) -> str:
+    """Normalize OCR artifacts like \\minimize -> \\min."""
+    latex = re.sub(r"\\minimize\b", r"\\min", latex)
+    latex = re.sub(r"\\maximize\b", r"\\max", latex)
+    return latex
+
+
+def sanitize_latex_math(latex: str) -> str:
+    """
+    Perform basic LaTeX sanitization for math content.
+    Simpler than book version (papers usually have cleaner OCR).
+    """
+    s = latex or ""
+    s = _normalize_opt_operators(s)
+    s = normalize_display_math(s)
+    s = normalize_double_backslash_begin_end(s)
+    s = _balance_math_env_pairs(s)
+    return s.strip()
+
+
+def heal_latex_fragment(latex: str) -> str:
+    """
+    Core healing pipeline for LaTeX fragments.
+    Minimal but essential fixes for LLM-generated LaTeX.
+    """
+    latex = strip_code_fences(latex)
+    latex = strip_outer_document(latex)
+    latex = normalize_unicode_symbols(latex)
+    latex = sanitize_latex_math(latex)
+    return latex.strip()
+
+
+# ---- Validation functions ----
+
+def _has_prompt_leak(s: str) -> bool:
+    """Detect if LLM output contains leaked prompt text."""
+    tell_tale = [
+        "the output must be latex",
+        "output only latex",
+        "convert ocr markdown",
+        "placeholders like zzz",
+        "do not invent",
+        "hard rules",
+        "environment rules",
+        "<<<proof>>>",
+        "<<<rest>>>",
+    ]
+    s_lower = (s or "").lower()
+    return any(tell in s_lower for tell in tell_tale)
+
+
+def _has_pathological_repetition(s: str) -> bool:
+    """Detect pathological repetition in LLM output (sign of failure)."""
+    lines = (s or "").splitlines()
+    if len(lines) < 5:
+        return False
+    
+    # Check if >40% of lines are identical
+    line_counts: Dict[str, int] = {}
+    for ln in lines:
+        normalized = re.sub(r"\s+", " ", ln.strip()).lower()
+        if len(normalized) > 20:  # Skip short lines
+            line_counts[normalized] = line_counts.get(normalized, 0) + 1
+    
+    if not line_counts:
+        return False
+    
+    max_count = max(line_counts.values())
+    if max_count > len(lines) * 0.4:
+        return True
+    
+    return False
+
+
+def _validate_llm_tex_output(raw: str) -> None:
+    """Validate LLM output for common failure modes."""
+    if _has_prompt_leak(raw):
+        raise LowQualityLLMOutput("LLM output leaked prompt text.")
+    if _has_pathological_repetition(raw):
+        raise LowQualityLLMOutput("LLM output is pathologically repetitive.")
+
+
+# ---- Core LLM conversion ----
+
+@retry(
+    reraise=True,
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=6),
+    retry=retry_if_exception_type(Exception),
+)
+def markdown_to_latex(client: OpenAI, model: str, markdown: str, max_tokens: int) -> str:
+    """
+    Convert a Markdown block to LaTeX using LLM, preserving display-math placeholders.
+    
+    Strategy:
+      1) Replace display-math blocks with stable placeholders
+      2) Send to LLM for conversion, keeping placeholders unchanged
+      3) Restore the math blocks
+      4) Heal common LaTeX issues
+    """
+    md_in = sanitize_ocr_markdown(markdown or "")
+    if not md_in.strip():
+        return ""
+    
+    # Placeholder preservation
+    md_ph, mapping, seq = replace_display_math_with_placeholders(md_in)
+    prompt = LATEX_CONVERT_PROMPT + md_ph.strip()
+    
+    # LLM call
+    raw = _chat_complete_text(
+        client,
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=max_tokens,
+        temperature=0.0,
+        top_p=1.0,
+    )
+    
+    # Clean and validate
+    raw = strip_code_fences(raw)
+    raw = strip_outer_document(raw)
+    _validate_llm_tex_output(raw)
+    
+    # Restore math placeholders
+    if mapping:
+        found = [match.group(0) for match in re.finditer(r"ZZZ_MATHBLOCK_\d+_ZZZ", raw)]
+        if found != seq:
+            # Fallback: if placeholders were corrupted, try segment-by-segment conversion
+            parts: List[str] = []
+            for kind, seg in split_markdown_by_display_math(md_in):
+                if kind == "math":
+                    parts.append(sanitize_display_math_block(seg))
+                else:
+                    t = (seg or "").strip()
+                    if t:
+                        parts.append(markdown_to_latex(client, model, t, max_tokens))
+            merged = "\n\n".join([p for p in parts if p and p.strip()])
+            return heal_latex_fragment(merged)
+        
+        raw = restore_display_math_placeholders(raw, mapping)
+    
+    return heal_latex_fragment(raw)
+
+
+def convert_block_to_latex(
+    block: Block,
+    client: OpenAI,
+    model: str,
+    max_tokens: int,
+) -> str:
+    """
+    Convert a single semantic block to LaTeX.
+    
+    - heading blocks: pass through (already structured)
+    - statement/proof blocks: convert with LLM
+    - paragraph blocks: convert with LLM
+    """
+    md = (block.md or "").strip()
+    if not md:
+        return ""
+    
+    # Headings pass through unchanged
+    if block.kind == "heading":
+        return md
+    
+    # Math blocks may not need conversion
+    if not block.kind or block.kind == "para":
+        return markdown_to_latex(client, model, md, max_tokens)
+    
+    # Statement, proof, definition, etc.
+    return markdown_to_latex(client, model, md, max_tokens)
+
+
+def convert_blocks_to_latex(
+    blocks: List[Block],
+    client: OpenAI,
+    model: str,
+    max_tokens: int,
+    workers: int = 4,
+) -> str:
+    """
+    Convert all semantic blocks to LaTeX in parallel (where safe).
+    Respect order, preserve heading boundaries.
+    """
+    if not blocks:
+        return ""
+    
+    results: List[str] = []
+    
+    # For now: sequential conversion to preserve chunk semantics
+    # (parallel conversion would require careful coordination to avoid heading/statement merging)
+    for i, block in enumerate(tqdm(blocks, desc="[convert]")):
+        try:
+            tex = convert_block_to_latex(block, client, model, max_tokens)
+            results.append(tex)
+        except Exception as e:
+            print(f"[convert] block {i} ({block.kind}): {e}", file=sys.stderr)
+            # Fallback: output block as-is (minimal loss)
+            results.append(block.md)
+    
+    # Join with blank lines for readability
+    return "\n\n".join([r for r in results if r and r.strip()]).strip()
+
+
+# =========================
 # Main (entry layer)
 # =========================
 
@@ -1214,10 +1539,30 @@ def main() -> None:
         f"proof={proof_count}, para={para_count})"
     )
 
-    # TODO: conversion layer (LLM block conversion)               — next step
-    # TODO: post-fix / assembly layer                              — next step
+    # ---- Conversion layer ----
+    # (10) Convert each block Markdown→LaTeX using LLM
+    max_tokens = int(get_setting(settings, "MDTOTEX_MAX_TOKENS", 2048))
+    latex = convert_blocks_to_latex(
+        blocks=blocks,
+        client=client,
+        model=model,
+        max_tokens=max_tokens,
+        workers=workers,
+    )
 
-    print(f"[stub] structural layer complete. blocks={len(blocks)}")
+    print(f"[convert] done — {len(latex)} chars")
+
+    # ---- Post-fix / Assembly layer ----
+    # (11) Final sanity checks and document assembly
+    latex = latex.strip()
+    
+    if not latex:
+        print(f"ERROR: Conversion produced empty output", file=sys.stderr)
+        sys.exit(3)
+
+    # (12) Write output
+    out_tex.write_text(latex, encoding="utf-8")
+    print(f"[output] LaTeX written to {out_tex}")
 
 
 if __name__ == "__main__":
