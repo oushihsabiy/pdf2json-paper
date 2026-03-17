@@ -1616,21 +1616,6 @@ def convert_blocks_to_latex(
                 return idx, []
 
             if blk.kind == "proof":
-                try:
-                    p_latex, r_latex = markdown_proof_split_to_latex(
-                        client=client,
-                        model=model,
-                        markdown=blk.md,
-                        max_tokens=max_tokens,
-                    )
-                    if p_latex:
-                        outs = [insert_block_sentinels(p_latex)]
-                        if r_latex.strip():
-                            outs.append(insert_block_sentinels(r_latex))
-                        return idx, outs
-                except Exception as e:
-                    print(f"[convert] block {idx} proof-split failed: {e}", file=sys.stderr)
-
                 latex = markdown_to_latex(client, model, blk.md, max_tokens=max_tokens)
                 latex = insert_block_sentinels(latex)
                 return idx, ([latex] if latex else [])

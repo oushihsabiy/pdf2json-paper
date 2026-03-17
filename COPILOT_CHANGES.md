@@ -94,3 +94,22 @@
 ### 影响范围
 - 更新文件 [src/paper/mdTotex.py](src/paper/mdTotex.py)
 - 更新记录文件 [COPILOT_CHANGES.md](COPILOT_CHANGES.md)
+
+## 2026-03-17（proof_split 简化）
+
+### 变更任务
+- 简化 proof 处理流程：不再拆分 `proof/rest`，proof 块整体转换。
+
+### 具体修改内容
+- 修改 [src/paper/mdTotex.py](src/paper/mdTotex.py) 的 `convert_blocks_to_latex`：
+	- 删除 `blk.kind == "proof"` 分支中对 `markdown_proof_split_to_latex` 的调用。
+	- 删除 proof-split 失败回退分支。
+	- 统一改为对 proof 块直接执行一次 `markdown_to_latex`，并再做 `insert_block_sentinels`。
+
+### 行为变化
+- 之前：尝试将 proof 块切分为 `<<<PROOF>>>` 与 `<<<REST>>>` 两段。
+- 现在：不做二次切分，整块按 proof 内容处理。
+
+### 影响范围
+- 更新文件 [src/paper/mdTotex.py](src/paper/mdTotex.py)
+- 更新记录文件 [COPILOT_CHANGES.md](COPILOT_CHANGES.md)
