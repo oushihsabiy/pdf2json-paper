@@ -129,3 +129,24 @@
 ### 影响范围
 - 更新文件 [src/paper/mdTotex.py](src/paper/mdTotex.py)
 - 更新记录文件 [COPILOT_CHANGES.md](COPILOT_CHANGES.md)
+
+## 2026-03-17（新增 proof 提前结束调试脚本）
+
+### 变更任务
+- 新增一个可复现调试脚本，用于定位 Theorem 4 proof 在 mdTotex 流程中为何提前出现 `\\end{proof}`。
+
+### 具体修改内容
+- 新建 [work/debug/test_proof_early_end.py](work/debug/test_proof_early_end.py)：
+	- 按标记提取目标 proof 块（默认 `*Proof of Theorem 4*` 到 `## 6 Breakdown of regularity`）。
+	- 统计并落盘中间产物：原始块、占位符替换后块。
+	- 挂钩 `src.paper.mdTotex._chat_complete_text`，跟踪每次 LLM 调用：
+		- prompt/response 字符数
+		- placeholder 序列是否一致
+		- response 中 `\\begin{proof}`/`\\end{proof}` 计数
+	- 自动判断是否触发递归 fallback（调用次数 > 1 且 placeholder 失配）。
+	- 输出 `trace_report.txt`，并定位最终 LaTeX 中首个 `\\end{proof}` 行号。
+	- 支持 `--dry-run` 与 `--max-tokens` 覆盖，方便快速对比 2048/4096/8192 的行为差异。
+
+### 影响范围
+- 新增文件 [work/debug/test_proof_early_end.py](work/debug/test_proof_early_end.py)
+- 更新记录文件 [COPILOT_CHANGES.md](COPILOT_CHANGES.md)
