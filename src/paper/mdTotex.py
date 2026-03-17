@@ -558,31 +558,6 @@ _PLACEHOLDER_RE = re.compile(r"\bZZZ_MATHBLOCK_\d{4}_ZZZ\b")
 _TAG_TOKEN_RE = re.compile(r"\\tag\*?\{[^}]*\}")
 
 
-def _is_tight_dollar_block(block: str) -> bool:
-    """
-    Accept $$...$$ only when content is adjacent to delimiters.
-    Reject cases like:
-      $$
-
-      ...
-      $$
-    or when a blank line exists right before closing $$.
-    """
-    s = (block or "")
-    if not re.match(r"(?s)^\$\$.*\$\$$", s.strip()):
-        return True
-
-    # opening $$ followed by a blank line
-    if re.match(r"(?s)^\$\$\s*\n\s*\n", s):
-        return False
-
-    # blank line right before closing $$
-    if re.search(r"(?s)\n\s*\n\s*\$\$\s*$", s):
-        return False
-
-    return True
-
-
 def _needs_aligned_wrapper(body: str) -> bool:
     s = body or ""
     if re.search(
@@ -632,27 +607,87 @@ def sanitize_display_math_block(block: str) -> str:
 def replace_display_math_with_placeholders(
     markdown: str,
 ) -> Tuple[str, Dict[str, str], List[str]]:
-    """Replace display-math blocks with immutable placeholder tokens."""
+    """
+    Replace display-math blocks with immutable placeholder tokens.
+    
+    Strategy:
+    - For $$...$$: pair odd-numbered $$ with next $$ (simple pairing rule)
+    - For \\[...\\]: use regex
+    - For \\begin{...}\\end{...}: use regex
+    """
     mapping: Dict[str, str] = {}
     seq: List[str] = []
     idx = 0
-
-    def _repl(m: re.Match) -> str:
-        nonlocal idx
-        raw = m.group(0)
-
-        # New rule: $$ display-math must be tight to delimiters.
-        # If not, keep original text and do not extract as math block.
-        if raw.lstrip().startswith("$$") and not _is_tight_dollar_block(raw):
-            return raw
-
+    
+    md = markdown or ""
+    result: List[str] = []
+    pos = 0
+    
+    # Step 1: Find all unescaped $$ positions
+    dollar_positions: List[int] = []
+    for m in re.finditer(r"(?<!\\)\$\$", md):
+        dollar_positions.append(m.start())
+    
+    # Step 2: Pair them: 0 with 1, 2 with 3, etc.
+    dollar_pairs = []
+    processed_ranges = set()  # ranges that have been paired
+    
+    for i in range(0, len(dollar_positions) - 1, 2):
+        start_pos = dollar_positions[i]
+        end_pos = dollar_positions[i + 1] + 2  # +2 to include closing $$
+        dollar_pairs.append((start_pos, end_pos))
+        processed_ranges.add((start_pos, end_pos))
+    
+    # Step 3: Find \[...\] and \begin{...}\end{...} blocks
+    other_blocks = []
+    for m in re.finditer(r"(?<!\\)\\\[.*?\\\]", md, re.DOTALL):
+        other_blocks.append((m.start(), m.end(), "bracket", m.group(0)))
+    for m in re.finditer(
+        r"\\begin\{(?P<env>(?:equation|align|gather|multline|flalign)\*?)\}.*?\\end\{(?P=env)\}",
+        md, re.DOTALL
+    ):
+        other_blocks.append((m.start(), m.end(), "begin", m.group(0)))
+    
+    # Step 4: Combine and sort all blocks by position
+    all_blocks = []
+    for start, end in dollar_pairs:
+        all_blocks.append((start, end, "dollar", md[start:end]))
+    for start, end, btype, raw in other_blocks:
+        all_blocks.append((start, end, btype, raw))
+    
+    all_blocks.sort(key=lambda x: x[0])
+    
+    # Step 5: De-duplicate overlapping blocks, keeping the first one
+    filtered_blocks = []
+    for start, end, btype, raw in all_blocks:
+        overlaps = False
+        for fstart, fend, _, _ in filtered_blocks:
+            if (start < fend and end > fstart):
+                overlaps = True
+                break
+        if not overlaps:
+            filtered_blocks.append((start, end, btype, raw))
+    
+    # Step 6: Process text and blocks in order
+    pos = 0
+    for start, end, btype, raw in filtered_blocks:
+        # Add text before this block
+        if start > pos:
+            result.append(md[pos:start])
+        
+        # Add placeholder for this block
         idx += 1
         ph = f"{PLACEHOLDER_PREFIX}{idx:04d}{PLACEHOLDER_SUFFIX}"
         seq.append(ph)
         mapping[ph] = sanitize_display_math_block(raw)
-        return "\n" + ph + "\n"
-
-    md2 = _DISPLAY_MATH_BLOCK_RE.sub(_repl, markdown or "")
+        result.append("\n" + ph + "\n")
+        pos = end
+    
+    # Add remaining text
+    if pos < len(md):
+        result.append(md[pos:])
+    
+    md2 = "".join(result)
     return md2, mapping, seq
 
 
@@ -1653,12 +1688,11 @@ def build_tex_document(body_chunks: List[str]) -> str:
 \providecommand{\maximize}{\max}
 
 % Theorem-like env names for downstream parsing
-\newtheorem{thm}{Theorem}[section]
-\newtheorem{lem}[thm]{Lemma}
-\newtheorem{prop}[thm]{Proposition}
-\newtheorem{cor}[thm]{Corollary}
-THEOREMSTYLE_MARKER
-\newtheorem{defn}[thm]{Definition}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
 
 \begin{document}
 """

@@ -37,3 +37,25 @@
 - 在 `replace_display_math_with_placeholders` 增加 `$$...$$` 抽取前置校验：
 	- 仅当 `$$` 与内容“紧贴”时才抽取为 math block。
 	- 若 `$$` 后立刻空行或 `$$` 前存在空行（即边界不紧贴），保持原文，不作为 display-math 占位符抽取。
+## 2026-03-17（续）
+
+### 变更任务
+- 改进 display-math 抽取机制：从严格的"紧邻边界"规则改为简单的"配对规则"。
+
+### 具体修改内容
+- 完全重写 [src/paper/mdTotex.py](src/paper/mdTotex.py) 的 `replace_display_math_with_placeholders` 函数：
+	- **新规则**：`$$` 按简单配对方式抽取 —— 第1个 `$$` 与第2个 `$$` 组成公式块，第3个与第4个组成公式块，依此类推。
+	- **优势**：避免了复杂的边界检查（如"是否存在空白行"），从而支持多行矩阵、分段公式等包含内部空白行的合法数学结构。
+	- **兼容性**：同时保留对 `\[...\]` 和 `\begin{equation|align|...}\end{...}` 块的正则表达式匹配。
+	- **重复消除**：对重叠的块进行去重，保留最先匹配的块。
+- 移除不再使用的 `_is_tight_dollar_block` 函数。
+
+### 影响范围
+- 更新文件 [src/paper/mdTotex.py](src/paper/mdTotex.py)。
+- 更新记录文件 [COPILOT_CHANGES.md](COPILOT_CHANGES.md)。
+
+### 测试验证
+- 通过单元测试验证：
+	- 简单的配对 `$$` 块可正确抽取。
+	- 包含多行矩阵、`\begin{bmatrix}`、`\tag{2}` 等结构的复杂 `$$` 块现在作为整体保留。
+	- 混合 `\[...\]`、`\begin{...}\end{...}` 和 `$$...$$` 块的文档正确处理。
