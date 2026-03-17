@@ -83,35 +83,6 @@ LATEX_CONVERT_PROMPT = (
     "Markdown:\n"
 )
 
-PROOF_SPLIT_PROMPT = (
-    "You are given OCR Markdown from an optimization paper that contains an explicit 'Proof.' marker.\n"
-    "The chunk may include non-proof text after the proof ends.\n"
-    "\n"
-    "Placeholders like ZZZ_MATHBLOCK_0001_ZZZ are immutable:\n"
-    "- Keep unchanged, same order, on their own lines.\n"
-    "- Do not move or wrap placeholders.\n"
-    "\n"
-    "Task:\n"
-    "1) Convert to LaTeX.\n"
-    "2) Split into (proof part) and (trailing non-proof part).\n"
-    "3) Output in EXACT format:\n"
-    "<<<PROOF>>>\n"
-    "<LaTeX proof env only: must contain \\\\begin{proof} ... \\\\end{proof}>\n"
-    "<<<REST>>>\n"
-    "<Remaining LaTeX after proof ends; empty if none>\n"
-    "\n"
-    "Rules:\n"
-    "- Output only the required two blocks; no commentary.\n"
-    "- Keep wording and order; no rewrite.\n"
-    "- Do not invent theorem/definition/section envs.\n"
-    "- Keep existing \\\\tag only; never invent new \\\\tag.\n"
-    "- If proof end is clear, move following text into <<<REST>>>.\n"
-    "- Never output instruction text.\n"
-    "\n"
-    "Markdown:\n"
-)
-
-
 # =========================
 # Config helpers
 # =========================
@@ -1424,63 +1395,6 @@ def markdown_to_latex(client: OpenAI, model: str, markdown: str, max_tokens: int
         raw = restore_display_math_placeholders(raw, mapping)
     
     return heal_latex_fragment(raw)
-
-
-def _parse_proof_split_response(text: str) -> Tuple[str, str]:
-    t = (text or "").strip()
-    t = strip_code_fences(t)
-    t = strip_outer_document(t)
-    m = re.search(r"(?s)<<<PROOF>>>\s*(.*?)\s*<<<REST>>>\s*(.*)\s*$", t)
-    if not m:
-        return "", ""
-    return m.group(1).strip(), m.group(2).strip()
-
-
-def _split_proof_output(text: str) -> Tuple[str, str]:
-    return _parse_proof_split_response(text)
-
-
-@retry(
-    reraise=True,
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=6),
-    retry=retry_if_exception_type(Exception),
-)
-def markdown_proof_split_to_latex(
-    client: OpenAI,
-    model: str,
-    markdown: str,
-    max_tokens: int,
-) -> Tuple[str, str]:
-    """
-    Convert a proof chunk and split it into:
-      - proof environment part
-      - trailing non-proof part
-    """
-    md_in = sanitize_ocr_markdown(markdown or "")
-    md_ph, mapping, _seq = replace_display_math_with_placeholders(md_in)
-
-    prompt = PROOF_SPLIT_PROMPT + md_ph.strip()
-    raw = _chat_complete_text(
-        client,
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=0.0,
-        top_p=1.0,
-    )
-    raw = strip_code_fences(raw)
-    raw = strip_outer_document(raw)
-    _validate_llm_tex_output(raw)
-
-    proof_part, rest_part = _split_proof_output(raw)
-    if mapping:
-        proof_part = restore_display_math_placeholders(proof_part, mapping)
-        rest_part = restore_display_math_placeholders(rest_part, mapping)
-
-    proof_tex = heal_latex_fragment(proof_part)
-    rest_tex = heal_latex_fragment(rest_part)
-    return proof_tex.strip(), rest_tex.strip()
 
 
 _TAG_RE = re.compile(r"\\tag\*?\{([^}]+)\}")

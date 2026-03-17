@@ -113,3 +113,19 @@
 ### 影响范围
 - 更新文件 [src/paper/mdTotex.py](src/paper/mdTotex.py)
 - 更新记录文件 [COPILOT_CHANGES.md](COPILOT_CHANGES.md)
+
+## 2026-03-17（清理无用 proof_split 代码）
+
+### 变更任务
+- 删除已不再使用的 proof_split 函数和 prompt。
+
+### 具体修改内容
+- 修改 [src/paper/mdTotex.py](src/paper/mdTotex.py)：
+	- 删除未使用的 `PROOF_SPLIT_PROMPT`。
+	- 删除未使用的 `_parse_proof_split_response`。
+	- 删除未使用的 `_split_proof_output`。
+	- 删除未使用的 `markdown_proof_split_to_latex`。
+
+### 影响范围
+- 更新文件 [src/paper/mdTotex.py](src/paper/mdTotex.py)
+- 更新记录文件 [COPILOT_CHANGES.md](COPILOT_CHANGES.md)
