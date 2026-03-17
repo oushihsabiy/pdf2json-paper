@@ -1318,7 +1318,7 @@ def heal_latex_fragment(latex: str) -> str:
 
 # ---- Validation functions ----
 
-def _has_prompt_leak(s: str, *, allow_proof_split_markers: bool = False) -> bool:
+def _has_prompt_leak(s: str) -> bool:
     """Detect if LLM output contains leaked prompt text."""
     tell_tale = [
         "the output must be latex",
@@ -1328,9 +1328,9 @@ def _has_prompt_leak(s: str, *, allow_proof_split_markers: bool = False) -> bool
         "do not invent",
         "hard rules",
         "environment rules",
+        "<<<proof>>>",
+        "<<<rest>>>",
     ]
-    if not allow_proof_split_markers:
-        tell_tale.extend(["<<<proof>>>", "<<<rest>>>"])
     s_lower = (s or "").lower()
     return any(tell in s_lower for tell in tell_tale)
 
@@ -1358,9 +1358,9 @@ def _has_pathological_repetition(s: str) -> bool:
     return False
 
 
-def _validate_llm_tex_output(raw: str, *, allow_proof_split_markers: bool = False) -> None:
+def _validate_llm_tex_output(raw: str) -> None:
     """Validate LLM output for common failure modes."""
-    if _has_prompt_leak(raw, allow_proof_split_markers=allow_proof_split_markers):
+    if _has_prompt_leak(raw):
         raise LowQualityLLMOutput("LLM output leaked prompt text.")
     if _has_pathological_repetition(raw):
         raise LowQualityLLMOutput("LLM output is pathologically repetitive.")
@@ -1405,7 +1405,7 @@ def markdown_to_latex(client: OpenAI, model: str, markdown: str, max_tokens: int
     # Clean and validate
     raw = strip_code_fences(raw)
     raw = strip_outer_document(raw)
-    _validate_llm_tex_output(raw, allow_proof_split_markers=True)
+    _validate_llm_tex_output(raw)
     
     # Restore math placeholders
     if mapping:
