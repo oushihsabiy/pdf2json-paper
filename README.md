@@ -98,6 +98,22 @@ python3 main.py --type proof_statement
 python3 main.py --type calculation --input data/ --output output/calc_results.json
 ```
 
+### 提取并预处理（推荐，与 jsonTolean 流水线兼容）
+
+加上 `--preprocess` 参数后，工具会在提取后自动做一步预处理：
+
+- 将 `problem` 字段替换为 `problem_finally`（规范化最终版题目陈述）
+- 只保留 8 个核心字段，去掉中间产物字段（`problem_with_context`、`problem_standardized_math`、`problem_finally`）
+
+```bash
+python3 main.py --type proof_statement --preprocess
+
+# 指定输出路径
+python3 main.py --type proof_statement --input data/ --output output/proof_preprocessed.json --preprocess
+```
+
+输出格式与 `jsonTolean_informal/work/` 中的 `*_preprocessed.json` 一致，可直接送入下游 Lean 形式化流水线。
+
 ### 参数说明
 
 | 参数 | 默认值 | 说明 |
@@ -105,6 +121,7 @@ python3 main.py --type calculation --input data/ --output output/calc_results.js
 | `--type` | 必填 | 题目类型（英文标识符） |
 | `--input` | `data/` | 存放 JSON 文件的目录 |
 | `--output` | `output/<type>.json` | 结果输出路径 |
+| `--preprocess` | 关闭 | 用 `problem_finally` 替换 `problem`，仅保留核心字段 |
 | `--list-types` | — | 打印所有支持的类型后退出 |
 
 ---

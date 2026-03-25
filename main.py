@@ -10,7 +10,7 @@ main.py — 题目提取工具
 import argparse
 import sys
 
-from extractor import TYPE_MAPPING, extract_by_type, save_results
+from extractor import TYPE_MAPPING, extract_by_type, preprocess_results, save_results
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="列出所有支持的题目类型并退出",
     )
+    parser.add_argument(
+        "--preprocess",
+        action="store_true",
+        help="提取后做预处理：用 problem_finally 替换 problem 并只保留核心字段（输出格式与 jsonTolean_informal 流水线兼容）",
+    )
     return parser
 
 
@@ -78,6 +83,11 @@ def main() -> None:
         sys.exit(0)
 
     print(f"\n共提取到 {len(results)} 条题目。")
+
+    if args.preprocess:
+        results = preprocess_results(results)
+        print(f"已完成预处理，输出 {len(results)} 条（problem 字段已替换为 problem_finally，仅保留核心字段）。")
+
     save_results(results, output_file)
 
 

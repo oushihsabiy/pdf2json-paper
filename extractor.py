@@ -51,9 +51,20 @@ def extract_by_type(input_dir: str, problem_type: str) -> list[dict]:
             print(f"[跳过] 无法解析文件 {json_file}：{e}")
             continue
 
+        def _type_matches(field, target: str) -> bool:
+            """判断条目的 `题目类型` 字段是否匹配目标类型。
+
+            支持字符串或列表形式的 `题目类型`。
+            """
+            if isinstance(field, list):
+                return any(isinstance(x, str) and x.strip() == target for x in field)
+            if isinstance(field, str):
+                return field.strip() == target
+            return False
+
         matched = [
             entry for entry in entries
-            if isinstance(entry, dict) and entry.get("题目类型") == problem_type
+            if isinstance(entry, dict) and _type_matches(entry.get("题目类型"), problem_type)
         ]
 
         if matched:
@@ -61,6 +72,35 @@ def extract_by_type(input_dir: str, problem_type: str) -> list[dict]:
             results.extend(matched)
 
     return results
+
+
+def preprocess_results(results: list[dict]) -> list[dict]:
+    """
+    将提取结果预处理为精简格式（与 jsonTolean_informal 流水线兼容）：
+
+    - 以 `problem_finally` 字段替换 `problem` 字段（若 `problem_finally` 存在且非空）。
+    - 只保留核心字段：index / source_idx / source / 题目类型 / 预估难度 /
+      problem / proof / direct_answer。
+    """
+    CORE_FIELDS = [
+        "index", "source_idx", "source",
+        "题目类型", "预估难度",
+        "problem", "proof", "direct_answer",
+    ]
+
+    processed = []
+    for entry in results:
+        new_entry: dict = {}
+        for field in CORE_FIELDS:
+            new_entry[field] = entry.get(field, "")
+
+        # 以 problem_finally 替换 problem（如果有内容）
+        final = entry.get("problem_finally", "")
+        if final and final.strip():
+            new_entry["problem"] = final.strip()
+
+        processed.append(new_entry)
+    return processed
 
 
 def save_results(results: list[dict], output_path: str) -> None:
