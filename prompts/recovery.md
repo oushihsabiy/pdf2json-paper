@@ -7,7 +7,7 @@ Rules:
 2. Do not change the mathematical intent of the theorem or definition.
 3. Preserve the metadata block comment at the top of the file.
 4. Keep the `import Mathlib` and `noncomputable section` / `open` statements.
-5. You may replace a proof with `by sorry` if you cannot fix the proof itself.
+5. Always replace every theorem/lemma proof body with `by sorry`. Never write real proof tactics.
 6. You may adjust type signatures, variable declarations, or notation to resolve type errors.
 7. Do not add explanations. Output ONLY the corrected Lean file content.
 

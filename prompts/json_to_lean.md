@@ -14,8 +14,8 @@ Requirements:
    - direct_answer
 3. Translate the `problem` field into strict Lean-style formalization.
 4. Use Lean 4 + Mathlib style.
-5. The main goal is to formalize the statement, not necessarily to prove it.
-6. If a full proof is difficult or impossible, provide an accurate theorem statement and use `by sorry`.
+5. The main goal is to formalize the statement, NOT to prove it.
+6. Always use `by sorry` for every theorem or lemma body. Never attempt to write a real proof.
 7. Do not invent an answer unless the problem already clearly specifies one.
 8. Do not output JSON.
 9. Do not output explanations or analysis.
@@ -59,7 +59,8 @@ open Set
 Important:
 
 * Keep the metadata in comments.
-* The Lean body must be as strict and valid as possible.
-* It is acceptable to use `sorry`, but not acceptable to replace the formalization with informal text.
+* The Lean body must be as strict and valid as possible for the **statement** (types, signatures, variables).
+* Every theorem/lemma **must** use `by sorry` as its proof body. Do not write any actual proof tactics.
+* It is not acceptable to replace the formalization with informal text.
 
 Now convert the following JSON object into a Lean file. Output ONLY the Lean file content, nothing else.
