@@ -1,5 +1,23 @@
 {
-  "api_key": "YOUR_API_KEY",
-  "base_url": "https://your-api-base/v1",
-  "model": "your-model"
+  "api_key": "YOUR_API_KEY_HERE",
+  "base_url": "https://api.openai.com/v1",
+  "model": "gpt-4o",
+  "preprocessing": {
+    "enabled": true,
+    "max_tokens": 4096,
+    "max_attempts": 8
+  },
+  "translation": {
+    "max_tokens": 4096,
+    "max_attempts": 3
+  },
+  "recovery": {
+    "max_tokens": 4096,
+    "max_retries": 5
+  },
+  "lean": {
+    "toolchain_dir": "lean",
+    "timeout_seconds": 120
+  },
+  "timeout_seconds": 180.0
 }
