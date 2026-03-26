@@ -9,10 +9,15 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 from .models import CompileResult, Exercise, ExerciseStatus
+
+# Number of parallel lean processes and within-process threads
+_PARALLEL_JOBS = int(os.environ.get("LEAN_PARALLEL_JOBS", "4"))
+_LEAN_THREADS = int(os.environ.get("LEAN_THREADS", "4"))
 
 
 # ------------------------------------------------------------------
@@ -30,7 +35,7 @@ def compile_lean_file(
 
     try:
         r = subprocess.run(
-            ["lake", "env", "lean", str(filepath)],
+            ["lake", "env", "lean", f"--threads={_LEAN_THREADS}", str(filepath)],
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -162,22 +167,42 @@ def validate_all(
     output_dir: Path,
     toolchain_dir: str = "lean",
     timeout: int = 120,
+    parallel_jobs: int | None = None,
 ) -> Dict[str, CompileResult]:
-    """Validate all exercises whose Lean files exist in *output_dir*."""
+    """Validate all exercises whose Lean files exist in *output_dir*.
+
+    Exercises are compiled in parallel (up to *parallel_jobs* at once)
+    to reduce total wall-clock time.
+    """
+    jobs = parallel_jobs if parallel_jobs is not None else _PARALLEL_JOBS
     results: Dict[str, CompileResult] = {}
     total = len(exercises)
 
-    for i, ex in enumerate(exercises, 1):
+    # Build the list of (exercise, lean_file) pairs that actually exist
+    pending = []
+    for ex in exercises:
         lean_file = output_dir / f"{_safe_label(ex.label)}.lean"
-        if not lean_file.exists():
-            print(f"[validator] [{i}/{total}] SKIP {ex.label} (no file)", file=sys.stderr)
-            continue
-        print(f"[validator] [{i}/{total}] compiling {ex.label}", file=sys.stderr)
-        result = validate_exercise(ex, lean_file, toolchain_dir, timeout)
-        results[ex.label] = result
+        if lean_file.exists():
+            pending.append((ex, lean_file))
+        else:
+            print(f"[validator] SKIP {ex.label} (no file)", file=sys.stderr)
 
-        status = "OK" if ex.is_valid else f"FAIL ({len(result.errors)} errors)"
-        print(f"[validator]   -> {status}", file=sys.stderr)
+    def _compile_one(args):
+        ex, lean_file = args
+        return ex, lean_file, validate_exercise(ex, lean_file, toolchain_dir, timeout)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = {pool.submit(_compile_one, item): item for item in pending}
+        for future in as_completed(futures):
+            ex, lean_file, result = future.result()
+            results[ex.label] = result
+            completed += 1
+            status = "OK" if ex.is_valid else f"FAIL ({len(result.errors)} errors)"
+            print(
+                f"[validator] [{completed}/{len(pending)}] {ex.label} -> {status}",
+                file=sys.stderr,
+            )
 
     return results
 
